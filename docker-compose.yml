@@ -1,0 +1,12 @@
+version: '3.8'
+services:
+  realtime-bridge:
+    build: .
+    container_name: realtime-bridge-vps
+    environment:
+      - PORT=3001
+      - DATABASE_URL=postgres://supabase_admin:fwbidgnia2xewi2cv7gjcbubmy6sjgcy@supabase.scape.nexus:5432/postgres?sslmode=disable
+      - JWT_SECRET=ptqutmjmkjsmqpu35jowt8nhqtgglua1
+    ports:
+      - "3001:3001"
+    restart: always
