@@ -47,7 +47,9 @@ io.use(async (socket: Socket, next) => {
   // 2. Si no es JWT, asumimos que es un token de Laravel Sanctum (estilo 1361|...)
   // Lo validamos contra el backend de Laravel
   try {
-    const response = await axios.get(`${LARAVEL_API_URL}/user`, {
+    // Limpiamos la URL para evitar dobles barras //
+    const baseUrl = LARAVEL_API_URL.endsWith('/') ? LARAVEL_API_URL.slice(0, -1) : LARAVEL_API_URL
+    const response = await axios.get(`${baseUrl}/user`, {
       headers: {
         Authorization: `Bearer ${cleanToken}`,
         Accept: 'application/json'
@@ -60,8 +62,10 @@ io.use(async (socket: Socket, next) => {
       return next()
     }
     next(new Error('Authentication error: Invalid Sanctum token'))
-  } catch (err) {
-    console.error('Laravel auth validation failed:', (err as any).message)
+  } catch (err: any) {
+    const status = err.response?.status
+    const errorData = err.response?.data
+    console.error(`[Bridge Auth] Laravel validation failed (${status || 'Network Error'}):`, errorData || err.message)
     next(new Error('Authentication error: Backend validation failed'))
   }
 })
