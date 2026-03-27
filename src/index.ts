@@ -5,6 +5,7 @@ import cors from 'cors'
 import { Client } from 'pg'
 import jwt from 'jsonwebtoken'
 import * as dotenv from 'dotenv'
+import axios from 'axios'
 
 dotenv.config()
 
@@ -20,22 +21,48 @@ const io = new Server(httpServer, {
 })
 
 const JWT_SECRET = process.env.JWT_SECRET || 'ptqutmjmkjsmqpu35jowt8nhqtgglua1'
+const LARAVEL_API_URL = process.env.VITE_APP_API_URL || 'https://api-orderwise-dev.qbitsinc.com/api'
 
-// Authentication middleware
-io.use((socket: Socket, next) => {
+// Authentication middleware (Dual: JWT & Laravel Sanctum)
+io.use(async (socket: Socket, next) => {
   const token = socket.handshake.auth.token || socket.handshake.headers.authorization
 
   if (!token) {
     return next(new Error('Authentication error: Token missing'))
   }
 
+  const cleanToken = token.replace('Bearer ', '')
+
+  // 1. Detección por formato: JWT (Supabase) suele empezar por eyJ
+  if (cleanToken.startsWith('eyJ')) {
+    try {
+      const decoded = jwt.verify(cleanToken, JWT_SECRET)
+      ;(socket as any).user = decoded
+      return next()
+    } catch (err) {
+      return next(new Error('Authentication error: Invalid JWT token'))
+    }
+  }
+
+  // 2. Si no es JWT, asumimos que es un token de Laravel Sanctum (estilo 1361|...)
+  // Lo validamos contra el backend de Laravel
   try {
-    const cleanToken = token.replace('Bearer ', '')
-    const decoded = jwt.verify(cleanToken, JWT_SECRET);
-    (socket as any).user = decoded
-    next()
+    const response = await axios.get(`${LARAVEL_API_URL}/user`, {
+      headers: {
+        Authorization: `Bearer ${cleanToken}`,
+        Accept: 'application/json'
+      }
+    })
+
+    if (response.status === 200) {
+      (socket as any).user = response.data
+      console.log(`User authenticated via Laravel: ${response.data.email || response.data.id}`)
+      return next()
+    }
+    next(new Error('Authentication error: Invalid Sanctum token'))
   } catch (err) {
-    next(new Error('Authentication error: Invalid token'))
+    console.error('Laravel auth validation failed:', (err as any).message)
+    next(new Error('Authentication error: Backend validation failed'))
   }
 })
 
