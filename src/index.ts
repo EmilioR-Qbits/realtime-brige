@@ -53,11 +53,11 @@ io.on('connection', (socket: Socket) => {
 })
 
 // Postgres Listener Setup
-const pgClient = new Client({
-  connectionString: process.env.DATABASE_URL
-})
-
 async function setupPgListener () {
+  const pgClient = new Client({
+    connectionString: process.env.DATABASE_URL
+  })
+
   try {
     await pgClient.connect()
     console.log('Connected to Postgres for LISTEN')
@@ -84,8 +84,15 @@ async function setupPgListener () {
         }
       }
     })
+
+    pgClient.on('error', (err) => {
+      console.error('Postgres unexpected client error:', err)
+      pgClient.end().catch(() => {})
+      setTimeout(setupPgListener, 5000)
+    })
   } catch (err) {
-    console.error('Postgres listener error:', err)
+    console.error('Postgres listener connection error:', err)
+    pgClient.end().catch(() => {})
     setTimeout(setupPgListener, 5000) // Retry after 5s
   }
 }
