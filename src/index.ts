@@ -3,9 +3,7 @@ import { createServer } from 'http'
 import { Server, Socket } from 'socket.io'
 import cors from 'cors'
 import { Client } from 'pg'
-import jwt from 'jsonwebtoken'
 import * as dotenv from 'dotenv'
-import axios from 'axios'
 
 dotenv.config()
 
@@ -20,54 +18,23 @@ const io = new Server(httpServer, {
   }
 })
 
-const JWT_SECRET = process.env.JWT_SECRET || 'ptqutmjmkjsmqpu35jowt8nhqtgglua1'
-const LARAVEL_API_URL = process.env.VITE_APP_API_URL || 'https://api-orderwise-dev.qbitsinc.com/api'
+const BRIDGE_SECRET = process.env.BRIDGE_SECRET || 'changeme'
 
-// Authentication middleware (Dual: JWT & Laravel Sanctum)
-io.use(async (socket: Socket, next) => {
-  const token = socket.handshake.auth.token || socket.handshake.headers.authorization
+// Authentication middleware (Shared Secret)
+io.use((socket: Socket, next) => {
+  const secret = socket.handshake.auth.secret || socket.handshake.headers['x-bridge-secret']
 
-  if (!token) {
-    return next(new Error('Authentication error: Token missing'))
+  if (!secret) {
+    return next(new Error('Authentication error: Secret missing'))
   }
 
-  const cleanToken = token.replace('Bearer ', '')
-
-  // 1. Detección por formato: JWT (Supabase) suele empezar por eyJ
-  if (cleanToken.startsWith('eyJ')) {
-    try {
-      const decoded = jwt.verify(cleanToken, JWT_SECRET)
-      ;(socket as any).user = decoded
-      return next()
-    } catch (err) {
-      return next(new Error('Authentication error: Invalid JWT token'))
-    }
+  if (secret !== BRIDGE_SECRET) {
+    console.warn(`[Bridge Auth] Invalid secret from socket ${socket.id}`)
+    return next(new Error('Authentication error: Invalid secret'))
   }
 
-  // 2. Si no es JWT, asumimos que es un token de Laravel Sanctum (estilo 1361|...)
-  // Lo validamos contra el backend de Laravel
-  try {
-    // Limpiamos la URL para evitar dobles barras //
-    const baseUrl = LARAVEL_API_URL.endsWith('/') ? LARAVEL_API_URL.slice(0, -1) : LARAVEL_API_URL
-    const response = await axios.get(`${baseUrl}/user`, {
-      headers: {
-        Authorization: `Bearer ${cleanToken}`,
-        Accept: 'application/json'
-      }
-    })
-
-    if (response.status === 200) {
-      (socket as any).user = response.data
-      console.log(`User authenticated via Laravel: ${response.data.email || response.data.id}`)
-      return next()
-    }
-    next(new Error('Authentication error: Invalid Sanctum token'))
-  } catch (err: any) {
-    const status = err.response?.status
-    const errorData = err.response?.data
-    console.error(`[Bridge Auth] Laravel validation failed (${status || 'Network Error'}):`, errorData || err.message)
-    next(new Error('Authentication error: Backend validation failed'))
-  }
+  console.log(`[Bridge Auth] Client authenticated: ${socket.id}`)
+  next()
 })
 
 io.on('connection', (socket: Socket) => {
