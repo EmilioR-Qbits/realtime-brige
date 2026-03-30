@@ -5,7 +5,7 @@ services:
     container_name: realtime-bridge-vps
     environment:
       - PORT=3001
-      - DATABASE_URL=postgresql://postgres.zpgwjkehwhjxggkripji:lHgiQ91S39Exq7zK@aws-0-us-west-2.pooler.supabase.com:6543/postgres?sslmode=disable
+      - DATABASE_URL=postgresql://postgres.zpgwjkehwhjxggkripji:lHgiQ91S39Exq7zK@aws-0-us-west-2.pooler.supabase.com:5432/postgres?sslmode=disable
       - BRIDGE_SECRET=5b11b8b815c6e1caec250e5061e93ad25a0da4a93e9e925e176be563c0614141
     ports:
       - "3001:3001"
