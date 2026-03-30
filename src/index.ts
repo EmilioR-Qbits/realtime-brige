@@ -7,113 +7,150 @@ import * as dotenv from 'dotenv'
 
 dotenv.config()
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const PORT = process.env.PORT || 3001
+const BRIDGE_SECRET = process.env.BRIDGE_SECRET || 'changeme'
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*'
+const PG_RECONNECT_DELAY_MS = 5000
+
+// ─── HTTP & Socket.io Setup ───────────────────────────────────────────────────
+
 const app = express()
-app.use(cors())
+app.use(cors({ origin: ALLOWED_ORIGIN }))
+
+/** Health check endpoint for Dokploy / load balancer probes */
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok', uptime: Math.floor(process.uptime()) })
+})
 
 const httpServer = createServer(app)
+
 const io = new Server(httpServer, {
   cors: {
-    origin: '*',
+    origin: ALLOWED_ORIGIN,
     methods: ['GET', 'POST']
   }
 })
 
-const BRIDGE_SECRET = process.env.BRIDGE_SECRET || 'changeme'
+// ─── Authentication Middleware (Shared Secret) ────────────────────────────────
 
-// Authentication middleware (Shared Secret)
 io.use((socket: Socket, next) => {
-  const secret = socket.handshake.auth.secret || socket.handshake.headers['x-bridge-secret']
+  const secret =
+    socket.handshake.auth.secret ||
+    socket.handshake.headers['x-bridge-secret']
 
-  if (!secret) {
-    return next(new Error('Authentication error: Secret missing'))
-  }
-
+  if (!secret) return next(new Error('Authentication error: Secret missing'))
   if (secret !== BRIDGE_SECRET) {
-    console.warn(`[Bridge Auth] Invalid secret from socket ${socket.id}`)
+    console.warn(`[Auth] Invalid secret from socket ${socket.id}`)
     return next(new Error('Authentication error: Invalid secret'))
   }
 
-  console.log(`[Bridge Auth] Client authenticated: ${socket.id}`)
+  console.log(`[Auth] Client authenticated: ${socket.id}`)
   next()
 })
 
+// ─── Socket.io Event Handlers ─────────────────────────────────────────────────
+
 io.on('connection', (socket: Socket) => {
-  console.log('User connected:', socket.id)
+  console.log(`[Socket] Connected: ${socket.id}`)
 
   socket.on('join_room', (roomId: string) => {
-    console.log(`Socket ${socket.id} joining room: ${roomId}`)
+    if (!roomId) return
+    console.log(`[Socket] ${socket.id} joined room: ${roomId}`)
     socket.join(roomId)
   })
 
-  // Bidirectional Broadcast (Typing, Presence, Instant Notifications)
-  socket.on('broadcast', (data: any) => {
+  /**
+   * Bidirectional broadcast (typing indicators, instant message delivery, presence).
+   * The sender is excluded from the specific-room relay to avoid echo.
+   * Admin-hub receives all message and typing events to guarantee full visibility.
+   */
+  socket.on('broadcast', (data: { channelId?: string; event?: string; payload?: unknown }) => {
     const { channelId, event, payload } = data
     if (!channelId || !event) return
 
-    console.log(`[Broadcast] ${event} from ${socket.id} to room ${channelId}`)
+    console.log(`[Broadcast] ${event} from ${socket.id} → room ${channelId}`)
 
-    // Relay to the specific room
+    // Relay to the specific chat room (exclude sender to avoid echo)
     socket.to(channelId).emit('broadcast', { channelId, event, payload })
 
-    // Optional: Relay to admin-hub if it's a message-related event
+    // Mirror message and typing events to the admin hub for global visibility
     if (event === 'new_message' || event === 'typing') {
       socket.to('admin-hub').emit('broadcast', { channelId, event, payload })
     }
   })
 
-  socket.on('disconnect', () => {
-    console.log('User disconnected:', socket.id)
+  socket.on('disconnect', reason => {
+    console.log(`[Socket] Disconnected: ${socket.id} (${reason})`)
   })
 })
 
-// Postgres Listener Setup
-async function setupPgListener () {
+// ─── Postgres LISTEN/NOTIFY ───────────────────────────────────────────────────
+
+async function setupPgListener (): Promise<void> {
   const pgClient = new Client({
     connectionString: process.env.DATABASE_URL
   })
 
   try {
     await pgClient.connect()
-    console.log('Connected to Postgres for LISTEN')
-
-    // Listen to chat_messages channel (requires a trigger in DB)
+    console.log('[PG] Connected, listening on chat_messages channel')
     await pgClient.query('LISTEN chat_messages')
 
-    pgClient.on('notification', (msg) => {
-      console.log('DB Notification received on channel:', msg.channel)
-      if (msg.payload) {
-        try {
-          const payload = JSON.parse(msg.payload)
-          const { channel_id: channelId } = payload
+    pgClient.on('notification', msg => {
+      if (!msg.payload) return
+      try {
+        const payload = JSON.parse(msg.payload)
+        const channelId: string | undefined = payload.channel_id
+        if (!channelId) return
 
-          if (channelId) {
-            console.log(`Broadcasting to room ${channelId}`)
-            // Broadcast to specific room
-            io.to(channelId).emit('new_message', payload)
-            // Also broadcast to a global hub if needed
-            io.to('admin-hub').emit('admin_message', payload)
-          }
-        } catch (e) {
-          console.error('Error parsing DB payload:', e)
-        }
+        console.log(`[PG] Notification → room ${channelId}`)
+        io.to(channelId).emit('new_message', payload)
+        io.to('admin-hub').emit('new_message', payload)
+      } catch (e) {
+        console.error('[PG] Error parsing notification payload:', e)
       }
     })
 
-    pgClient.on('error', (err) => {
-      console.error('Postgres unexpected client error:', err)
+    pgClient.on('error', err => {
+      console.error('[PG] Unexpected client error:', err)
       pgClient.end().catch(() => {})
-      setTimeout(setupPgListener, 5000)
+      setTimeout(setupPgListener, PG_RECONNECT_DELAY_MS)
     })
+
+    // Register cleanup for graceful shutdown
+    pgCleanup = async () => {
+      await pgClient.end()
+      console.log('[PG] Connection closed')
+    }
   } catch (err) {
-    console.error('Postgres listener connection error:', err)
+    console.error('[PG] Connection error:', err)
     pgClient.end().catch(() => {})
-    setTimeout(setupPgListener, 5000) // Retry after 5s
+    setTimeout(setupPgListener, PG_RECONNECT_DELAY_MS)
   }
 }
 
+// ─── Graceful Shutdown ────────────────────────────────────────────────────────
+
+let pgCleanup: (() => Promise<void>) | null = null
+
+async function shutdown (signal: string): Promise<void> {
+  console.log(`\n[Server] ${signal} received — shutting down gracefully`)
+  io.close()
+  httpServer.close()
+  if (pgCleanup) await pgCleanup()
+  console.log('[Server] Shutdown complete')
+  process.exit(0)
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGINT', () => shutdown('SIGINT'))
+
+// ─── Bootstrap ───────────────────────────────────────────────────────────────
+
 setupPgListener()
 
-const PORT = process.env.PORT || 3001
 httpServer.listen(PORT, () => {
-  console.log(`Realtime Bridge listening on port ${PORT}`)
+  console.log(`[Server] Realtime Bridge listening on port ${PORT}`)
 })
