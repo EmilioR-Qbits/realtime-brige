@@ -95,9 +95,8 @@ async function setupPgListener (): Promise<void> {
 
   try {
     await pgClient.connect()
-    console.log('[PG] Connected, listening on chat_messages channel')
-    await pgClient.query('LISTEN new_message')
 
+    // Register listener BEFORE the LISTEN query to ensure no notifications are missed
     pgClient.on('notification', msg => {
       console.log(`[PG] Raw notification from channel "${msg.channel}"`)
       if (!msg.payload) {
@@ -122,6 +121,9 @@ async function setupPgListener (): Promise<void> {
         console.error('[PG] Original payload:', msg.payload)
       }
     })
+
+    console.log('[PG] Connected, listening on "new_message" channel')
+    await pgClient.query('LISTEN new_message')
 
     pgClient.on('error', err => {
       console.error('[PG] Unexpected client error:', err)
