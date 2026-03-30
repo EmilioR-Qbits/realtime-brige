@@ -45,6 +45,22 @@ io.on('connection', (socket: Socket) => {
     socket.join(roomId)
   })
 
+  // Bidirectional Broadcast (Typing, Presence, Instant Notifications)
+  socket.on('broadcast', (data: any) => {
+    const { channelId, event, payload } = data
+    if (!channelId || !event) return
+
+    console.log(`[Broadcast] ${event} from ${socket.id} to room ${channelId}`)
+
+    // Relay to the specific room
+    socket.to(channelId).emit('broadcast', { channelId, event, payload })
+
+    // Optional: Relay to admin-hub if it's a message-related event
+    if (event === 'new_message' || event === 'typing') {
+      socket.to('admin-hub').emit('broadcast', { channelId, event, payload })
+    }
+  })
+
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id)
   })
