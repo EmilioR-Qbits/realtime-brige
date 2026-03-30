@@ -96,7 +96,7 @@ async function setupPgListener (): Promise<void> {
   try {
     await pgClient.connect()
     console.log('[PG] Connected, listening on chat_messages channel')
-    await pgClient.query('LISTEN chat_messages')
+    await pgClient.query('LISTEN new_message')
 
     pgClient.on('notification', msg => {
       if (!msg.payload) return
