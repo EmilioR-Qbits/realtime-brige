@@ -99,17 +99,27 @@ async function setupPgListener (): Promise<void> {
     await pgClient.query('LISTEN new_message')
 
     pgClient.on('notification', msg => {
-      if (!msg.payload) return
+      console.log(`[PG] Raw notification from channel "${msg.channel}"`)
+      if (!msg.payload) {
+        console.warn('[PG] Empty payload received')
+        return
+      }
+
       try {
         const payload = JSON.parse(msg.payload)
         const channelId: string | undefined = payload.channel_id
-        if (!channelId) return
 
-        console.log(`[PG] Notification → room ${channelId}`)
+        if (!channelId) {
+          console.warn('[PG] No channel_id in payload:', payload)
+          return
+        }
+
+        console.log(`[PG] Success: Dispatching to room ${channelId} and admin-hub`)
         io.to(channelId).emit('new_message', payload)
         io.to('admin-hub').emit('new_message', payload)
       } catch (e) {
         console.error('[PG] Error parsing notification payload:', e)
+        console.error('[PG] Original payload:', msg.payload)
       }
     })
 
