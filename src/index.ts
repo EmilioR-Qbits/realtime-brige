@@ -79,13 +79,6 @@ app.post('/mark-read', async (req, res) => {
       payload: { channelId, role, userId }
     })
 
-    // Failsafe: Also clear typing on mark-read
-    io.to(channelId).emit('broadcast', {
-      channelId,
-      event: 'typing',
-      payload: { userId: 'system', isTyping: false, channelId }
-    })
-
     res.json({
       success: true,
       rowsUpdated: result.rowCount
@@ -97,11 +90,11 @@ app.post('/mark-read', async (req, res) => {
 })
 
 /**
- * Endpoint for n8n or other external services to trigger a "typing" status.
- * URL: POST /typing
+ * Endpoint for n8n or other external services to set typing status.
+ * URL: POST /set-typing
  * Body: { channelId: string, isTyping: boolean, userId?: string }
  */
-app.post('/typing', (req, res) => {
+app.post('/set-typing', async (req, res) => {
   const secret = req.headers['x-bridge-secret'] || req.body.secret
   if (secret !== BRIDGE_SECRET) {
     return res.status(401).json({ error: 'Unauthorized' })
@@ -112,21 +105,34 @@ app.post('/typing', (req, res) => {
     return res.status(400).json({ error: 'Missing channelId' })
   }
 
-  // Broadcast typing status to the room
-  io.to(channelId).emit('broadcast', {
-    channelId,
-    event: 'typing',
-    payload: { userId: userId || 'assistant', isTyping, channelId }
-  })
+  try {
+    const payload = {
+      channelId,
+      isTyping: !!isTyping,
+      userId: userId || 'assistant-bot'
+    }
 
-  // Mirror to admin-hub
-  io.to('admin-hub').emit('broadcast', {
-    channelId,
-    event: 'typing',
-    payload: { userId: userId || 'assistant', isTyping, channelId }
-  })
+    console.log(`[HTTP] Typing ${payload.isTyping ? 'ON' : 'OFF'} for ${channelId}`)
 
-  res.json({ success: true })
+    // Broadcast to the room
+    io.to(channelId).emit('broadcast', {
+      channelId,
+      event: 'typing',
+      payload
+    })
+
+    // Also notify admin-hub
+    io.to('admin-hub').emit('broadcast', {
+      channelId,
+      event: 'typing',
+      payload
+    })
+
+    res.json({ success: true })
+  } catch (err) {
+    console.error('[Error] /set-typing failed:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
 })
 
 const httpServer = createServer(app)
@@ -219,19 +225,8 @@ async function setupPgListener (): Promise<void> {
         }
 
         console.log(`[PG] Success: Dispatching to room ${channelId} and admin-hub`)
-
-        // 1. Dispatch the actual database record
         io.to(channelId).emit('new_message', payload)
         io.to('admin-hub').emit('new_message', payload)
-
-        // 2. Broadcast "typing: false" to clear indicators on all clients
-        const typingReset = {
-          channelId,
-          event: 'typing',
-          payload: { userId: 'system', isTyping: false, channelId }
-        }
-        io.to(channelId).emit('broadcast', typingReset)
-        io.to('admin-hub').emit('broadcast', typingReset)
       } catch (e) {
         console.error('[PG] Error parsing notification payload:', e)
         console.error('[PG] Original payload:', msg.payload)
