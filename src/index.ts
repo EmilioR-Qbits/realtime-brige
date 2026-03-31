@@ -227,6 +227,11 @@ async function setupPgListener (): Promise<void> {
         console.log(`[PG] Success: Dispatching to room ${channelId} and admin-hub`)
         io.to(channelId).emit('new_message', payload)
         io.to('admin-hub').emit('new_message', payload)
+
+        // Auto-disable typing indicator when a real message arrives from DB
+        const stopTypingPayload = { channelId, isTyping: false, userId: 'system' }
+        io.to(channelId).emit('broadcast', { channelId, event: 'typing', payload: stopTypingPayload })
+        io.to('admin-hub').emit('broadcast', { channelId, event: 'typing', payload: stopTypingPayload })
       } catch (e) {
         console.error('[PG] Error parsing notification payload:', e)
         console.error('[PG] Original payload:', msg.payload)
