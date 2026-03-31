@@ -79,6 +79,13 @@ app.post('/mark-read', async (req, res) => {
       payload: { channelId, role, userId }
     })
 
+    // Failsafe: Also clear typing on mark-read
+    io.to(channelId).emit('broadcast', {
+      channelId,
+      event: 'typing',
+      payload: { userId: 'system', isTyping: false, channelId }
+    })
+
     res.json({
       success: true,
       rowsUpdated: result.rowCount
@@ -212,8 +219,19 @@ async function setupPgListener (): Promise<void> {
         }
 
         console.log(`[PG] Success: Dispatching to room ${channelId} and admin-hub`)
+
+        // 1. Dispatch the actual database record
         io.to(channelId).emit('new_message', payload)
         io.to('admin-hub').emit('new_message', payload)
+
+        // 2. Failsafe: Dispatch "typing: false" via broadcast to clear indicators on all clients
+        const typingReset = {
+          channelId,
+          event: 'typing',
+          payload: { userId: 'system', isTyping: false, channelId }
+        }
+        io.to(channelId).emit('broadcast', typingReset)
+        io.to('admin-hub').emit('broadcast', typingReset)
       } catch (e) {
         console.error('[PG] Error parsing notification payload:', e)
         console.error('[PG] Original payload:', msg.payload)
