@@ -18,6 +18,15 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL
 })
 
+/**
+ * Tracks when the last message was received per channel.
+ * Used to suppress stale "isTyping: true" events that arrive
+ * after a message is already on the way (race condition with n8n).
+ * @type {Map<string, number>}
+ */
+const lastMessageTime = new Map<string, number>()
+const TYPING_SUPPRESSION_MS = 2000 // suppress typing:true for 2s after a message
+
 // ─── HTTP & Socket.io Setup ───────────────────────────────────────────────────
 
 const app = express()
@@ -110,6 +119,16 @@ app.post('/typing', (req, res) => {
   const { channelId, isTyping, userId } = req.body
   if (!channelId) {
     return res.status(400).json({ error: 'Missing channelId' })
+  }
+
+  // Race condition guard: suppress isTyping:true if a message was recently received
+  // This prevents stale "typing on" events from n8n arriving after the PG reset.
+  if (isTyping) {
+    const last = lastMessageTime.get(channelId) || 0
+    if (Date.now() - last < TYPING_SUPPRESSION_MS) {
+      console.log(`[Typing] Suppressed isTyping:true for ${channelId} (recent message detected)`)
+      return res.json({ success: true, suppressed: true })
+    }
   }
 
   // Broadcast typing status to the room
@@ -220,11 +239,16 @@ async function setupPgListener (): Promise<void> {
 
         console.log(`[PG] Success: Dispatching to room ${channelId} and admin-hub`)
 
+        // Track last message time to suppress stale typing:true from n8n
+        lastMessageTime.set(channelId, Date.now())
+        // Clean up old entries after suppression window to avoid memory growth
+        setTimeout(() => lastMessageTime.delete(channelId), TYPING_SUPPRESSION_MS + 500)
+
         // 1. Dispatch the actual database record
         io.to(channelId).emit('new_message', payload)
         io.to('admin-hub').emit('new_message', payload)
 
-        // 2. Failsafe: Dispatch "typing: false" via broadcast to clear indicators on all clients
+        // 2. Broadcast "typing: false" to clear indicators on all clients
         const typingReset = {
           channelId,
           event: 'typing',
