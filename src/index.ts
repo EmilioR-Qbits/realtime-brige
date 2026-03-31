@@ -2,7 +2,7 @@ import express from 'express'
 import { createServer } from 'http'
 import { Server, Socket } from 'socket.io'
 import cors from 'cors'
-import { Client } from 'pg'
+import { Client, Pool } from 'pg'
 import * as dotenv from 'dotenv'
 
 dotenv.config()
@@ -14,14 +14,112 @@ const BRIDGE_SECRET = process.env.BRIDGE_SECRET || 'changeme'
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*'
 const PG_RECONNECT_DELAY_MS = 5000
 
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL
+})
+
 // ─── HTTP & Socket.io Setup ───────────────────────────────────────────────────
 
 const app = express()
 app.use(cors({ origin: ALLOWED_ORIGIN }))
+app.use(express.json())
 
 /** Health check endpoint for Dokploy / load balancer probes */
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', uptime: Math.floor(process.uptime()) })
+})
+
+/**
+ * Endpoint for n8n or other external services to mark messages as read.
+ * This updates the database and broadcasts the event via Socket.io.
+ * URL: POST /mark-read
+ * Body: { channelId: string, role?: string, userId?: string }
+ */
+app.post('/mark-read', async (req, res) => {
+  const secret = req.headers['x-bridge-secret'] || req.body.secret
+  if (secret !== BRIDGE_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized: Secret mismatch or missing' })
+  }
+
+  const { channelId, role, userId } = req.body
+  if (!channelId) {
+    return res.status(400).json({ error: 'Missing channelId' })
+  }
+
+  try {
+    // 1. Update database: Mark as read messages in this channel
+    // We can filter by role or by sender_user_id (if provided)
+    let query = 'UPDATE chat_messages SET is_read = true WHERE channel_id = $1 AND is_read = false'
+    const params = [channelId]
+
+    if (role) {
+      query += ' AND role = $2'
+      params.push(role)
+    } else if (userId) {
+      query += ' AND sender_user_id = $2'
+      params.push(userId)
+    }
+
+    const result = await pool.query(query, params)
+
+    console.log(`[HTTP] Marked ${result.rowCount} messages as read in channel ${channelId}`)
+
+    // 2. Broadcast the event via Socket.io
+    // This allows the UI to update the checkmarks/unread indicators immediately
+    io.to(channelId).emit('broadcast', {
+      channelId,
+      event: 'messages_read',
+      payload: { channelId, role, userId }
+    })
+
+    // Also notify admin-hub for visibility
+    io.to('admin-hub').emit('broadcast', {
+      channelId,
+      event: 'messages_read',
+      payload: { channelId, role, userId }
+    })
+
+    res.json({
+      success: true,
+      rowsUpdated: result.rowCount
+    })
+  } catch (err) {
+    console.error('[Error] /mark-read failed:', err)
+    res.status(500).json({ error: 'Internal server error while updating chat_messages' })
+  }
+})
+
+/**
+ * Endpoint for n8n or other external services to trigger a "typing" status.
+ * URL: POST /typing
+ * Body: { channelId: string, isTyping: boolean, userId?: string }
+ */
+app.post('/typing', (req, res) => {
+  const secret = req.headers['x-bridge-secret'] || req.body.secret
+  if (secret !== BRIDGE_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+
+  const { channelId, isTyping, userId } = req.body
+  if (!channelId) {
+    return res.status(400).json({ error: 'Missing channelId' })
+  }
+
+  // Broadcast typing status to the room
+  io.to(channelId).emit('broadcast', {
+    channelId,
+    event: 'typing',
+    payload: { userId: userId || 'assistant', isTyping, channelId }
+  })
+
+  // Mirror to admin-hub
+  io.to('admin-hub').emit('broadcast', {
+    channelId,
+    event: 'typing',
+    payload: { userId: userId || 'assistant', isTyping, channelId }
+  })
+
+  res.json({ success: true })
 })
 
 const httpServer = createServer(app)
@@ -152,6 +250,7 @@ async function shutdown (signal: string): Promise<void> {
   io.close()
   httpServer.close()
   if (pgCleanup) await pgCleanup()
+  await pool.end()
   console.log('[Server] Shutdown complete')
   process.exit(0)
 }
