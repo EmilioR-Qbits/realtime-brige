@@ -183,8 +183,14 @@ io.on('connection', (socket: Socket) => {
 
     console.log(`[Broadcast] ${event} from ${socket.id} → room ${channelId}`)
 
-    // Relay to the specific chat room (exclude sender to avoid echo)
-    socket.to(channelId).emit('broadcast', { channelId, event, payload })
+    // Relay to the specific chat room
+    if (event === 'messages_read') {
+      // Use io.to() to ensure delivery to everyone in the room.
+      // Echo is fine for read-events as it reinforces the state.
+      io.to(channelId).emit('broadcast', { channelId, event, payload })
+    } else {
+      socket.to(channelId).emit('broadcast', { channelId, event, payload })
+    }
 
     // Mirror message, typing, and read events to the admin hub for global visibility
     if (event === 'new_message' || event === 'typing' || event === 'messages_read') {
