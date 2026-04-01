@@ -186,8 +186,8 @@ io.on('connection', (socket: Socket) => {
     // Relay to the specific chat room (exclude sender to avoid echo)
     socket.to(channelId).emit('broadcast', { channelId, event, payload })
 
-    // Mirror message and typing events to the admin hub for global visibility
-    if (event === 'new_message' || event === 'typing') {
+    // Mirror message, typing, and read events to the admin hub for global visibility
+    if (event === 'new_message' || event === 'typing' || event === 'messages_read') {
       socket.to('admin-hub').emit('broadcast', { channelId, event, payload })
     }
   })
